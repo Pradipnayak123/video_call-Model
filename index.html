@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Group Chat + Calls (Partner)</title>
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; background:#f1f1f1; margin:0; padding:0;}
+    .app { max-width:1100px; margin:20px auto; display:grid; grid-template-columns: 380px 1fr; gap:16px; }
+    .panel { background:#fff; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.06); padding:14px; }
+    h2 { margin:8px 0 12px; color:#075e54; }
+    /* Chat */
+    #chatMessages { height:48vh; overflow:auto; padding:10px; background:#ece5dd; border-radius:8px; }
+    .msg { margin:10px 0; display:flex; gap:10px; align-items:flex-start; }
+    .avatar { width:40px;height:40px;border-radius:50%;background:#128c7e;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;}
+    .bubble { background:#fff;padding:10px;border-radius:8px; max-width:100%; box-shadow:0 2px 6px rgba(0,0,0,0.08);}
+    .meta { font-size:12px;color:#666;margin-bottom:6px; }
+    .chat-controls { display:flex; gap:8px; margin-top:10px; }
+    input[type=text] { padding:8px;border-radius:6px;border:1px solid #ccc; width:100%; }
+    button { padding:8px 12px;border-radius:6px;border:none;background:#128c7e;color:#fff;cursor:pointer; }
+    button.secondary { background:#075e54; }
+    /* Video area */
+    .video-grid { display:flex; flex-wrap:wrap; gap:8px; padding:8px; min-height:200px; }
+    video { background:#000;border-radius:8px; width:320px; height:180px; object-fit:cover; }
+    .controls { display:flex; gap:8px; margin-top:10px; }
+    .topbar { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+    .participants { margin-top:10px; font-size:14px; color:#333; }
+    .participant-item { display:flex; align-items:center; gap:8px; padding:6px 4px; border-bottom:1px dashed #eee; }
+    .small-muted { font-size:12px; color:#666; }
+    @media (max-width:900px){ .app{grid-template-columns:1fr; padding:8px;} video{width:100%; height:220px;} }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- LEFT: Chat & Room controls -->
+    <div class="panel">
+      <h2>Group Chat & Room</h2>
+      <div style="margin-bottom:8px;">
+        <input id="username" type="text" placeholder="Your name" />
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <input id="roomId" type="text" placeholder="Room ID (e.g., room123)" />
+          <button id="createRoomBtn" title="Create a random Room ID">Create</button>
+          <button id="copyRoomBtn" title="Copy Room ID" disabled>Copy</button>
+        </div>
+
+        <div style="margin-top:8px;" class="chat-controls">
+          <button id="joinBtn">Join Room</button>
+          <button id="leaveBtn" class="secondary" disabled>Leave Room</button>
+        </div>
+
+        <small class="small-muted">Use same Room ID to join same call & chat.</small>
+      </div>
+
+      <hr />
+
+      <div id="chatMessages"></div>
+
+      <div class="chat-controls" style="margin-top:10px;">
+        <input id="messageInput" type="text" placeholder="Type a message..." />
+        <button id="sendBtn">Send</button>
+      </div>
+
+      <div class="participants" id="participantsListContainer">
+        <strong>Participants:</strong>
+        <div id="participantsList"></div>
+      </div>
+
+      <small style="display:block;margin-top:10px;color:#666;">
+        Chat uses Firebase Realtime DB. Messages persist there.
+      </small>
+    </div>
+
+    <!-- RIGHT: Video & Controls -->
+    <div class="panel">
+      <div class="topbar">
+        <h2 style="flex:1">Video & Voice Call</h2>
+        <div>
+          <label><input id="voiceOnly" type="checkbox"> Voice-only</label>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="startCallBtn" disabled>Start/Join Call</button>
+        <button id="leaveCallBtn" disabled class="secondary">Leave Call</button>
+        <button id="toggleAudioBtn" disabled>Mute</button>
+        <button id="toggleVideoBtn" disabled>Stop Video</button>
+      </div>
+
+      <div style="margin-top:10px;" class="video-grid" id="videoGrid">
+        <!-- local and remote videos will appear here -->
+      </div>
+
+      <small style="display:block;margin-top:10px;color:#666;">
+        Uses WebRTC (mesh). For production, add TURN server to improve connectivity.
+      </small>
+    </div>
+  </div>
+
+  <!-- Firebase (compat for simple) -->
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+
+  <!-- Socket.io client (served from your server) -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <script>
+    /* ---------------------------
+       Replace with your Firebase config
+       --------------------------- */
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    // UI refs
+    const usernameInput = document.getElementById("username");
+    const roomInput = document.getElementById("roomId");
+    const createRoomBtn = document.getElementById("createRoomBtn");
+    const copyRoomBtn = document.getElementById("copyRoomBtn");
+    const joinBtn = document.getElementById("joinBtn");
+    const leaveBtn = document.getElementById("leaveBtn");
+    const chatMessages = document.getElementById("chatMessages");
+    const messageInput = document.getElementById("messageInput");
+    const sendBtn = document.getElementById("sendBtn");
+    const participantsList = document.getElementById("participantsList");
+
+    const startCallBtn = document.getElementById("startCallBtn");
+    const leaveCallBtn = document.getElementById("leaveCallBtn");
+    const toggleAudioBtn = document.getElementById("toggleAudioBtn");
+    const toggleVideoBtn = document.getElementById("toggleVideoBtn");
+    const voiceOnlyCheckbox = document.getElementById("voiceOnly");
+    const videoGrid = document.getElementById("videoGrid");
+
+    // Firebase chat reference (per room)
+    let chatRef = null;
+
+    // Signaling socket (connects to same server that serves this file)
+   const socket = io("https://my-signaling-server.onrender.com");
+ // autoConnect to server origin
+
+    // WebRTC globals
+    const pcs = {}; // pc per remote socketId
+    const remoteVideos = {}; // video element per peer
+    let localStream = null;
+    let mySocketId = null;
+    let joinedRoom = null;
+    let name = "Guest";
+
+    // Keep participant list (socketId + name)
+    let participants = [];
+
+    // STUN/TURN config
+    const ICE_CONFIG = {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" }
+        // Add TURN here for production
+      ]
+    };
+
+    // Utilities
+    function getInitials(n) { if (!n) return "AN"; return n.split(" ").map(s => s[0]).join("").slice(0,2).toUpperCase(); }
+    function escapeHtml(s){ return (s+"").replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[ch])); }
+
+    function renderParticipants() {
+      participantsList.innerHTML = "";
+      participants.forEach(p => {
+        const div = document.createElement("div");
+        div.className = "participant-item";
+        div.innerHTML = `<div style="width:28px;height:28px;border-radius:50%;background:#128c7e;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;">${getInitials(p.name)}</div>
+                         <div style="flex:1">${escapeHtml(p.name)} <small style="color:#666; margin-left:8px;">${p.socketId === mySocketId ? "(You)" : p.socketId}</small></div>`;
+        participantsList.appendChild(div);
+      });
+    }
+
+    function addChatMessage({ name, message, time }) {
+      const item = document.createElement("div");
+      item.className = "msg";
+      item.innerHTML = `
+        <div class="avatar">${getInitials(name)}</div>
+        <div>
+          <div class="meta"><strong>${escapeHtml(name)}</strong> <span style="margin-left:8px;color:#777">${escapeHtml(time)}</span></div>
+          <div class="bubble">${escapeHtml(message)}</div>
+        </div>
+      `;
+      chatMessages.appendChild(item);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    // Firebase chat functions
+    function setupChat(roomId) {
+      chatRef = db.ref("groupChat/" + roomId);
+      chatRef.off();
+      chatRef.on("child_added", snapshot => addChatMessage(snapshot.val()));
+    }
+
+    function sendChatMessage(text) {
+      if (!chatRef) return;
+      const msg = { name, message: text, time: new Date().toLocaleTimeString() };
+      chatRef.push(msg);
+      messageInput.value = "";
+    }
+
+    /* ----------------------------
+       ROOM creation / joining UI
+       ---------------------------- */
+    createRoomBtn.addEventListener("click", () => {
+      // create short random room id
+      const id = Math.random().toString(36).substring(2,9);
+      roomInput.value = id;
+      copyRoomBtn.disabled = false;
+      roomInput.focus();
+      alert("Room created. Share this ID with your team: " + id);
+    });
+
+    copyRoomBtn.addEventListener("click", async () => {
+      const val = roomInput.value.trim();
+      if (!val) return alert("No room ID to copy");
+      try {
+        await navigator.clipboard.writeText(val);
+        alert("Room ID copied: " + val);
+      } catch (e) {
+        alert("Copy failed. Room ID: " + val);
+      }
+    });
+
+    // Join room
+    joinBtn.addEventListener("click", () => {
+      name = usernameInput.value.trim() || "Guest";
+      const roomId = roomInput.value.trim();
+      if (!roomId) return alert("Enter or create a Room ID first.");
+      joinedRoom = roomId;
+
+      if (!socket.connected) socket.connect();
+
+      // store who is in our local participants list for now (server will respond with existing participants)
+      socket.emit("join-room", { roomId, name });
+
+      joinBtn.disabled = true;
+      leaveBtn.disabled = false;
+      startCallBtn.disabled = false;
+      copyRoomBtn.disabled = false;
+
+      setupChat(roomId);
+
+      // show local system message in chat
+      setTimeout(()=> { if (chatRef) chatRef.push({ name: "System", message: `${name} joined room.`, time: new Date().toLocaleTimeString() }); }, 300);
+    });
+
+    leaveBtn.addEventListener("click", () => {
+      if (!joinedRoom) return;
+      socket.emit("leave-room", { roomId: joinedRoom });
+      joinBtn.disabled = false;
+      leaveBtn.disabled = true;
+      startCallBtn.disabled = true;
+      stopAllConnections();
+      joinedRoom = null;
+      participants = [];
+      renderParticipants();
+      if (chatRef) { chatRef.off(); chatRef = null; chatMessages.innerHTML = ""; }
+    });
+
+    // Send chat
+    sendBtn.addEventListener("click", () => {
+      const text = messageInput.value.trim();
+      if (!text) return;
+      sendChatMessage(text);
+    });
+    messageInput.addEventListener("keydown", e => { if (e.key === "Enter") sendBtn.click(); });
+
+    /* ----------------------------
+       WEBRTC: local stream / UI helpers
+       ---------------------------- */
+    async function getLocalStream(voiceOnly) {
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+        localStream = null;
+      }
+      try {
+        const constraints = voiceOnly ? { audio: true, video: false } : { audio: true, video: { width: 640, height: 360 } };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        localStream = stream;
+        return stream;
+      } catch (err) {
+        alert("Could not get media: " + err.message);
+        throw err;
+      }
+    }
+
+    function createLocalVideoEl(stream) {
+      const v = document.createElement("video");
+      v.autoplay = true;
+      v.muted = true;
+      v.playsInline = true;
+      v.srcObject = stream;
+      v.setAttribute("data-local", "true");
+      v.style.border = "3px solid #128c7e";
+      return v;
+    }
+
+    function createRemoteVideoEl(peerId) {
+      const v = document.createElement("video");
+      v.autoplay = true;
+      v.playsInline = true;
+      v.id = "remote_" + peerId;
+      return v;
+    }
+
+    /* ----------------------------
+       PEER CONNECTIONS
+       ---------------------------- */
+    function createPeerConnection(peerId, iceConfig = ICE_CONFIG) {
+      if (pcs[peerId]) return pcs[peerId];
+      const pc = new RTCPeerConnection(iceConfig);
+      pcs[peerId] = pc;
+
+      // attach local tracks if available
+      if (localStream) {
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      }
+
+      // ontrack -> collect remote stream
+      const remoteStream = new MediaStream();
+      pc.addEventListener("track", e => {
+        e.streams[0].getTracks().forEach(t => remoteStream.addTrack(t));
+      });
+
+      // create and attach remote video element
+      const remoteVideo = createRemoteVideoEl(peerId);
+      remoteVideo.srcObject = remoteStream;
+      remoteVideos[peerId] = remoteVideo;
+      videoGrid.appendChild(remoteVideo);
+
+      pc.onicecandidate = event => {
+        if (event.candidate) {
+          socket.emit("ice-candidate", { to: peerId, from: mySocketId, candidate: event.candidate });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "failed" || pc.connectionState === "disconnected" || pc.connectionState === "closed") {
+          cleanupPeer(peerId);
+        }
+      };
+
+      return pc;
+    }
+
+    function cleanupPeer(peerId) {
+      if (pcs[peerId]) {
+        try { pcs[peerId].close(); } catch(_) {}
+        delete pcs[peerId];
+      }
+      if (remoteVideos[peerId]) {
+        try { remoteVideos[peerId].srcObject = null; } catch(_) {}
+        remoteVideos[peerId].remove();
+        delete remoteVideos[peerId];
+      }
+    }
+
+    function stopAllConnections() {
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+        localStream = null;
+      }
+      Object.keys(pcs).forEach(k => cleanupPeer(k));
+      const localEl = document.querySelector("video[data-local='true']");
+      if (localEl) localEl.remove();
+      leaveCallBtn.disabled = true;
+      startCallBtn.disabled = false;
+      toggleAudioBtn.disabled = true;
+      toggleVideoBtn.disabled = true;
+    }
+
+    /* ----------------------------
+       Start / Stop call buttons
+       ---------------------------- */
+    startCallBtn.addEventListener("click", async () => {
+      if (!joinedRoom) { alert("Join a room first"); return; }
+      try {
+        const voiceOnly = !!voiceOnlyCheckbox.checked;
+        await getLocalStream(voiceOnly);
+
+        if (!voiceOnly) {
+          const localV = createLocalVideoEl(localStream);
+          videoGrid.prepend(localV);
+        } else {
+          const audioBadge = document.createElement("div");
+          audioBadge.id = "audioBadge";
+          audioBadge.innerHTML = `<div style="padding:8px;background:#128c7e;color:#fff;border-radius:8px;">You (voice)</div>`;
+          videoGrid.prepend(audioBadge);
+        }
+
+        startCallBtn.disabled = true;
+        leaveCallBtn.disabled = false;
+        toggleAudioBtn.disabled = false;
+        toggleVideoBtn.disabled = voiceOnly ? true : false;
+
+        // Create offers to ALL known participants (this handles the case where participants joined BEFORE you started the call)
+        for (const p of participants) {
+          if (p.socketId === mySocketId) continue;
+          // If pc already exists skip
+          if (pcs[p.socketId]) continue;
+          await negotiateAsCaller(p.socketId);
+        }
+
+      } catch (err) {
+        console.error(err);
+        return;
+      }
+    });
+
+    leaveCallBtn.addEventListener("click", () => {
+      Object.keys(pcs).forEach(peerId => {
+        socket.emit("user-left", { to: peerId });
+        cleanupPeer(peerId);
+      });
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+        localStream = null;
+      }
+      const localEl = document.querySelector("video[data-local='true']");
+      if (localEl) localEl.remove();
+      const badge = document.getElementById("audioBadge");
+      if (badge) badge.remove();
+      startCallBtn.disabled = false;
+      leaveCallBtn.disabled = true;
+      toggleAudioBtn.disabled = true;
+      toggleVideoBtn.disabled = true;
+    });
+
+    toggleAudioBtn.addEventListener("click", () => {
+      if (!localStream) return;
+      const audioTracks = localStream.getAudioTracks();
+      if (!audioTracks.length) return;
+      const enabled = audioTracks[0].enabled;
+      audioTracks.forEach(t => t.enabled = !enabled);
+      toggleAudioBtn.textContent = enabled ? "Unmute" : "Mute";
+    });
+
+    toggleVideoBtn.addEventListener("click", () => {
+      if (!localStream) return;
+      const videoTracks = localStream.getVideoTracks();
+      if (!videoTracks.length) return;
+      const enabled = videoTracks[0].enabled;
+      videoTracks.forEach(t => t.enabled = !enabled);
+      toggleVideoBtn.textContent = enabled ? "Start Video" : "Stop Video";
+    });
+
+    /* ----------------------------
+       Signaling socket handlers
+       ---------------------------- */
+    socket.on("connect", () => {
+      mySocketId = socket.id;
+      console.log("Connected to signaling server: ", mySocketId);
+    });
+
+    // When you join, server sends a list of existing participants
+    socket.on("existing-participants", async (clients) => {
+      // replace participants list
+      participants = clients.slice(); // copy
+      // ensure you also include yourself in participants list for UI
+      participants.unshift({ socketId: mySocketId, name });
+      renderParticipants();
+
+      // If we've already started local media, create offers now to everyone else
+      if (localStream) {
+        for (const c of clients) {
+          if (c.socketId === mySocketId) continue;
+          if (!pcs[c.socketId]) await negotiateAsCaller(c.socketId);
+        }
+      }
+    });
+
+    // When someone joins after you
+    socket.on("user-joined", async ({ socketId, name: otherName }) => {
+      // add to participants
+      participants.push({ socketId, name: otherName || "Anonymous" });
+      renderParticipants();
+
+      // if we already have local media started, create an offer to them
+      if (localStream) {
+        await negotiateAsCaller(socketId);
+      }
+    });
+
+    socket.on("user-left", ({ socketId }) => {
+      // remove from participants list
+      participants = participants.filter(p => p.socketId !== socketId);
+      renderParticipants();
+      cleanupPeer(socketId);
+    });
+
+    // Offer from other -> set remote desc + answer
+    socket.on("call-offer", async ({ from, sdp }) => {
+      console.log("Received offer from", from);
+      const pc = createPeerConnection(from);
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit("call-answer", { to: from, from: mySocketId, sdp: pc.localDescription });
+    });
+
+    // When they answer our offer
+    socket.on("call-answer", async ({ from, sdp }) => {
+      console.log("Received answer from", from);
+      const pc = pcs[from];
+      if (!pc) { console.warn("No pc for ", from); return; }
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    });
+
+    // ICE candidates relay
+    socket.on("ice-candidate", async ({ from, candidate }) => {
+      const pc = pcs[from];
+      if (pc && candidate) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.warn("Error adding ice candidate", err);
+        }
+      }
+    });
+
+    // Helper to create offer to a peer
+    async function negotiateAsCaller(peerId) {
+      const pc = createPeerConnection(peerId);
+      // ensure tracks are present
+      if (localStream) {
+        const senders = pc.getSenders().map(s => s.track).filter(Boolean);
+        localStream.getTracks().forEach(track => {
+          if (!senders.includes(track)) pc.addTrack(track, localStream);
+        });
+      }
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit("call-offer", { to: peerId, from: mySocketId, sdp: pc.localDescription });
+    }
+
+    socket.on("disconnect", () => {
+      console.log("Signaling disconnected");
+      stopAllConnections();
+    });
+
+    /* ----------------------------
+       Small UX niceties
+       ---------------------------- */
+    roomInput.addEventListener("keydown", e => { if (e.key === "Enter") joinBtn.click(); });
+    usernameInput.addEventListener("keydown", e => { if (e.key === "Enter") joinBtn.click(); });
+
+    window.addEventListener("beforeunload", () => {
+      if (joinedRoom) socket.emit("leave-room", { roomId: joinedRoom });
+    });
+
+    // Show current socket id log
+    socket.on("connect", () => {
+      mySocketId = socket.id;
+      console.log("socket connected:", mySocketId);
+    });
+
+    // "System join" message in chat when join button clicked (only for UI)
+    joinBtn.addEventListener("click", () => {
+      if (!joinedRoom || !chatRef) return;
+      setTimeout(() => {
+        if (chatRef) chatRef.push({ name: "System", message: `${name} joined room.`, time: new Date().toLocaleTimeString() });
+      }, 400);
+    });
+
+    // Chat send helper for Enter
+    messageInput.addEventListener("keydown", e => { if (e.key === "Enter") sendBtn.click(); });
+
+    // For immediate feedback, enable copy button when a room value exists
+    roomInput.addEventListener("input", () => { copyRoomBtn.disabled = !roomInput.value.trim(); });
+  </script>
+</body>
+</html>
